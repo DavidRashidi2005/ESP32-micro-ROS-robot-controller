@@ -579,3 +579,10 @@ ros2 topic echo /ultrasonic
 ```
 
 ---
+
+# Last change on this code
+* Deactived the Ultrasonic publisher
+* Added the motor comand safty check
+* Changed move logic to reset every time
+* Changed speed logic to avoid to stop evry time
+* Other things to emprove speed of the ESP32
