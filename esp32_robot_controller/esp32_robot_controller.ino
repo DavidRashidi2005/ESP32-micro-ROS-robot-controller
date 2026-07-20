@@ -1,7 +1,13 @@
+#include <ESP32Servo.h>
+//#include <analogWrite.h>
+//#include <tone.h>
+//#include <ESP32Tone.h>
+#include <ESP32PWM.h>
+
+
 #include <micro_ros_arduino.h>
 #include <rmw_microros/rmw_microros.h>
 
-#include <ESP32Servo.h>
 #include <stdio.h>
 #include <string.h>
 #include <rcl/rcl.h>
@@ -23,10 +29,10 @@ std_msgs__msg__Int8 servo_msg;
 rcl_subscription_t motor_subscriber;
 std_msgs__msg__String motor_msg;
 
-rcl_publisher_t ultrasonic_publisher;
-std_msgs__msg__Int16 ultrasonic_msg;
+//rcl_publisher_t ultrasonic_publisher;
+//std_msgs__msg__Int16 ultrasonic_msg;
 
-rcl_timer_t ultrasonic_timer;
+//rcl_timer_t ultrasonic_timer;
 
 rclc_executor_t executor;
 rclc_support_t support;
@@ -251,14 +257,13 @@ void stopAll() {
 
 void measureSpeed() {
   unsigned long now = millis();
-  if (now - prev_speed_time >= 50) {
-    long current = getEncoderTicks();
-    long delta = current - prev_ticks;
-    float dt = (now - prev_speed_time) / 1000.0;
-    current_rpm = (delta / (float)TICKS_PER_REV) / (dt / 60.0);
-    prev_ticks = current;
-    prev_speed_time = now;
-  }
+  if (now == prev_speed_time) return;
+  long current = getEncoderTicks();
+  long delta = current - prev_ticks;
+  float dt = (now - prev_speed_time) / 1000.0;
+  current_rpm = (delta / (float)TICKS_PER_REV) / (dt / 60.0);
+  prev_ticks = current;
+  prev_speed_time = now;
 }
 
 void updateSpeedPID() {
@@ -313,6 +318,16 @@ void updateMoveAtSpeed() {
 
 // ==================== Motor API ====================
 void setSpeed(float rpm) {
+  if (rpm == 0) {
+    stopMotor();
+    return;
+  }
+
+  if (control_mode == 1) {
+    speed_target = rpm;
+    return;
+  }
+
   stopAll();
   if (rpm != 0) {
     control_mode = 1;
@@ -324,13 +339,20 @@ void setSpeed(float rpm) {
 }
 
 void moveDistance(float degrees, float rpm) {
-  stopAll();
+  control_mode = 0;
+  speed_target = 0;
+  setMotorPWM(0);
+  move_done = false;
+  move_speed = 0;
+
+  resetEncoderTicks();
+  prev_ticks = 0;
+
   control_mode = 2;
-  intended_position += (long)(degrees / 360.0 * TICKS_PER_REV);
+  intended_position = (long)(degrees / 360.0 * TICKS_PER_REV);
   position_target = intended_position;
   move_speed = rpm;
   move_done = false;
-  prev_ticks = getEncoderTicks();
   prev_speed_time = millis();
   current_rpm = 0;
 }
@@ -443,16 +465,21 @@ void servo_callback(const void* msgin) {
 
 void motor_callback(const void* msgin) {
   const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msgin;
+  if (msg->data.size < MOTOR_MSG_BUF_SIZE) {
+    msg->data.data[msg->data.size] = '\0';
+  } else {
+    msg->data.data[MOTOR_MSG_BUF_SIZE - 1] = '\0';
+  }
   processMotorCommand(msg->data.data);
 }
 
-void ultrasonic_timer_callback(rcl_timer_t* timer, int64_t last_call_time) {
-  (void)last_call_time;
-  if (timer != NULL) {
-    ultrasonic_msg.data = last_distance_cm;
-    RCSOFTCHECK(rcl_publish(&ultrasonic_publisher, &ultrasonic_msg, NULL));
-  }
-}
+//void ultrasonic_timer_callback(rcl_timer_t* timer, int64_t last_call_time) {
+//  (void)last_call_time;
+//  if (timer != NULL) {
+//    ultrasonic_msg.data = last_distance_cm;
+//    RCSOFTCHECK(rcl_publish(&ultrasonic_publisher, &ultrasonic_msg, NULL));
+//  }
+//}
 
 // ==================== micro-ROS Entity Management ====================
 bool createEntities() {
@@ -484,25 +511,25 @@ bool createEntities() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
     "/motor_cmd"));
 
-  RCCHECK(rclc_publisher_init_best_effort(
-    &ultrasonic_publisher,
-    &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int16),
-    "/ultrasonic"));
+//  RCCHECK(rclc_publisher_init_best_effort(
+//    &ultrasonic_publisher,
+//    &node,
+//    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int16),
+//    "/ultrasonic"));
 
-  RCCHECK(rclc_timer_init_default(
-    &ultrasonic_timer,
-    &support,
-    RCL_MS_TO_NS(100),
-    ultrasonic_timer_callback));
+//  RCCHECK(rclc_timer_init_default(
+//    &ultrasonic_timer,
+//    &support,
+//    RCL_MS_TO_NS(100),
+//    ultrasonic_timer_callback));
 
-  RCCHECK(rclc_executor_init(&executor, &support.context, 4, &allocator));
+  RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
   RCCHECK(rclc_executor_set_timeout(&executor, 0));
 
   RCCHECK(rclc_executor_add_subscription(&executor, &LEDs_subscriber, &LEDs_msg, &LEDs_subscription_callback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(&executor, &servo_subscriber, &servo_msg, &servo_callback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(&executor, &motor_subscriber, &motor_msg, &motor_callback, ON_NEW_DATA));
-  RCCHECK(rclc_executor_add_timer(&executor, &ultrasonic_timer));
+//  RCCHECK(rclc_executor_add_timer(&executor, &ultrasonic_timer));
 
   return true;
 }
@@ -514,16 +541,16 @@ void destroyEntities() {
   rcl_subscription_fini(&LEDs_subscriber, &node);
   rcl_subscription_fini(&servo_subscriber, &node);
   rcl_subscription_fini(&motor_subscriber, &node);
-  rcl_publisher_fini(&ultrasonic_publisher, &node);
-  rcl_timer_fini(&ultrasonic_timer);
+//  rcl_publisher_fini(&ultrasonic_publisher, &node);
+//  rcl_timer_fini(&ultrasonic_timer);
   rclc_executor_fini(&executor);
   rcl_node_fini(&node);
   rclc_support_fini(&support);
 }
 
 // ==================== Ultrasonic Trigger Timer ====================
-unsigned long last_ultrasonic_trigger = 0;
-#define ULTRASONIC_INTERVAL 100
+//unsigned long last_ultrasonic_trigger = 0;
+//#define ULTRASONIC_INTERVAL 100
 
 // ==================== Setup ====================
 void setup() {
@@ -591,14 +618,17 @@ void loop() {
       break;
 
     case AGENT_CONNECTED:
-      if (rclc_executor_spin_some(&executor, 0) != RCL_RET_OK) {
-        state = AGENT_DISCONNECTED;
-      } else {
-        static unsigned long lastPingTime = 0;
-        if (now - lastPingTime >= 1000) {
-          lastPingTime = now;
-          if (rmw_uros_ping_agent(50, 1) != RMW_RET_OK) {
-            state = AGENT_DISCONNECTED;
+      {
+        rcl_ret_t spin_rc = rclc_executor_spin_some(&executor, 0);
+        if (spin_rc != RCL_RET_OK && spin_rc != RCL_RET_TIMEOUT) {
+          state = AGENT_DISCONNECTED;
+        } else {
+          static unsigned long lastPingTime = 0;
+          if (now - lastPingTime >= 1000) {
+            lastPingTime = now;
+            if (rmw_uros_ping_agent(100, 3) != RMW_RET_OK) {
+              state = AGENT_DISCONNECTED;
+            }
           }
         }
       }
@@ -613,22 +643,21 @@ void loop() {
   }
 
   // Ultrasonic trigger
-  if (now - last_ultrasonic_trigger >= ULTRASONIC_INTERVAL) {
-    if (!trig_sent) {
-      triggerUltrasonic();
-      last_ultrasonic_trigger = now;
-    }
-  }
+//  if (now - last_ultrasonic_trigger >= ULTRASONIC_INTERVAL) {
+//    if (!trig_sent) {
+//      triggerUltrasonic();
+//      last_ultrasonic_trigger = now;
+//    }
+//  }
 
-  // Ultrasonic process
-  processUltrasonic();
+//  // Ultrasonic process
+//  processUltrasonic();
 
-  // Motor speed
-  measureSpeed();
-
-  // Motor PID
+  // Motor speed & PID
   if (now - pid_last_time >= PID_INTERVAL) {
     pid_last_time = now;
+
+    measureSpeed();
 
     if (control_mode == 1) {
       updateSpeedPID();
